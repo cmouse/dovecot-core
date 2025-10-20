@@ -35,6 +35,11 @@ struct sql_commit_result_delayed {
 	void *context;
 };
 
+struct sql_query_arg {
+	const char *arg;
+	bool set;
+};
+
 struct event_category event_category_sql = {
 	.name = "sql",
 };
@@ -347,7 +352,7 @@ const char *sql_statement_get_log_query(struct sql_statement *stmt)
 const char *sql_statement_get_query(struct sql_statement *stmt)
 {
 	string_t *query = t_str_new(128);
-	const char *const *args;
+	const struct sql_statement_arg *args;
 	unsigned int args_count, arg_pos = 0;
 	const char *p0, *p1;
 
@@ -357,11 +362,15 @@ const char *sql_statement_get_query(struct sql_statement *stmt)
 		/* append until ? */
 		str_append_max(query, p0, (p1 - p0));
 		if (arg_pos >= args_count ||
-		    args[arg_pos] == NULL) {
+		    !args[arg_pos].set) {
 			i_panic("lib-sql: Missing bind for arg #%u in statement: %s",
 				arg_pos, stmt->query_template);
 		}
-		str_append(query, args[arg_pos++]);
+		if (args[arg_pos].arg == NULL)
+			str_append(query, "NULL");
+		else
+			str_append(query, args[arg_pos].arg);
+		arg_pos++;
 		p0 = p1 + 1;
 	}
 	str_append(query, p0);
@@ -493,13 +502,28 @@ void sql_statement_set_no_log_expanded_values(struct sql_statement *stmt,
 	stmt->no_log_expanded_values = no_expand;
 }
 
+static void
+sql_statement_arg_set(struct sql_statement *stmt, unsigned int column_idx,
+		      const char *value)
+{
+	while (array_count(&stmt->args) <= column_idx)
+		array_append_space(&stmt->args);
+
+	struct sql_statement_arg *arg =
+		array_idx_modifiable(&stmt->args, column_idx);
+	arg->arg = value;
+	arg->set = TRUE;
+}
+
 void sql_statement_bind_str(struct sql_statement *stmt,
 			    unsigned int column_idx, const char *value)
 {
-	const char *escaped_value =
-		p_strdup_printf(stmt->pool, "'%s'",
+	const char *escaped_value = NULL;
+	if (value != NULL) {
+		escaped_value = p_strdup_printf(stmt->pool, "'%s'",
 				sql_escape_string(stmt->db, value));
-	array_idx_set(&stmt->args, column_idx, &escaped_value);
+	}
+	sql_statement_arg_set(stmt, column_idx, escaped_value);
 
 	if (stmt->db->v.statement_bind_str != NULL)
 		stmt->db->v.statement_bind_str(stmt, column_idx, value);
@@ -509,10 +533,13 @@ void sql_statement_bind_binary(struct sql_statement *stmt,
 			       unsigned int column_idx, const void *value,
 			       size_t value_size)
 {
-	const char *value_str =
-		p_strdup_printf(stmt->pool, "%s",
+	i_assert(value != NULL || value_size == 0);
+	const char *value_str = NULL;
+	if (value != NULL) {
+		value_str = p_strdup_printf(stmt->pool, "%s",
 				sql_escape_blob(stmt->db, value, value_size));
-	array_idx_set(&stmt->args, column_idx, &value_str);
+	}
+	sql_statement_arg_set(stmt, column_idx, value_str);
 
 	if (stmt->db->v.statement_bind_binary != NULL) {
 		stmt->db->v.statement_bind_binary(stmt, column_idx,
@@ -524,7 +551,7 @@ void sql_statement_bind_int64(struct sql_statement *stmt,
 			      unsigned int column_idx, int64_t value)
 {
 	const char *value_str = p_strdup_printf(stmt->pool, "%"PRId64, value);
-	array_idx_set(&stmt->args, column_idx, &value_str);
+	sql_statement_arg_set(stmt, column_idx, value_str);
 
 	if (stmt->db->v.statement_bind_int64 != NULL)
 		stmt->db->v.statement_bind_int64(stmt, column_idx, value);
@@ -534,7 +561,7 @@ void sql_statement_bind_double(struct sql_statement *stmt,
 			       unsigned int column_idx, double value)
 {
 	const char *value_str = p_strdup_printf(stmt->pool, "%f", value);
-	array_idx_set(&stmt->args, column_idx, &value_str);
+	sql_statement_arg_set(stmt, column_idx, value_str);
 
 	if (stmt->db->v.statement_bind_double != NULL)
 		stmt->db->v.statement_bind_double(stmt, column_idx, value);
@@ -544,7 +571,7 @@ void sql_statement_bind_uuid(struct sql_statement *stmt,
 			     unsigned int column_idx, const guid_128_t uuid)
 {
 	const char *value_str = p_strdup(stmt->pool, guid_128_to_uuid_string(uuid, FORMAT_RECORD));
-	array_idx_set(&stmt->args, column_idx, &value_str);
+	sql_statement_arg_set(stmt, column_idx, value_str);
 
 	if (stmt->db->v.statement_bind_uuid != NULL)
 		stmt->db->v.statement_bind_uuid(stmt, column_idx, uuid);
