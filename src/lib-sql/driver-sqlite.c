@@ -377,6 +377,9 @@ static const char *
 driver_sqlite_escape_string(struct sql_db *_db ATTR_UNUSED,
 			    const char *string)
 {
+	if (string == NULL)
+		return "";
+
 	const char *p;
 	char *dest, *destbegin;
 
@@ -912,6 +915,10 @@ static const char *
 driver_sqlite_escape_blob(struct sql_db *_db ATTR_UNUSED,
 			  const unsigned char *data, size_t size)
 {
+	i_assert(data != NULL || size == 0);
+	if (data == NULL)
+		return "";
+
 	string_t *str = t_str_new(128);
 
 	str_append(str, "x'");
