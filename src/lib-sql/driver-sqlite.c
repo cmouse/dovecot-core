@@ -70,6 +70,7 @@ struct sqlite_settings {
 
 	const char *path;
 	const char *journal_mode;
+	const char *synchronous;
 	bool readonly;
 
 	/* generated: */
@@ -83,6 +84,7 @@ struct sqlite_settings {
 static const struct setting_define sqlite_setting_defines[] = {
 	DEF(STR, path),
 	DEF(ENUM, journal_mode),
+	DEF(ENUM, synchronous),
 	DEF(BOOL, readonly),
 
 	SETTING_DEFINE_LIST_END
@@ -90,6 +92,7 @@ static const struct setting_define sqlite_setting_defines[] = {
 static const struct sqlite_settings sqlite_default_settings = {
 	.path = "",
 	.journal_mode = "wal:delete",
+	.synchronous = "full:off:normal:full:extra",
 	.readonly = FALSE,
 };
 static bool
@@ -266,6 +269,19 @@ static const char *driver_sqlite_connect_error(struct sqlite_db *db)
 	return err;
 }
 
+static void
+driver_sqlite_set_pragma_synchronous(struct sql_db *db, const char *value)
+{
+	const char *query =
+		t_strdup_printf("PRAGMA synchronous = %s", t_str_ucase(value));
+	struct sql_result *res = sql_query_s(db, query);
+	if (res->failed) {
+		e_warning(res->event, "Failed to execute '%s': %s", query,
+			  sql_result_get_error(res));
+	}
+	sql_result_unref(res);
+}
+
 static int driver_sqlite_connect(struct sql_db *_db)
 {
 	struct sqlite_db *db = container_of(_db, struct sqlite_db, api);
@@ -289,6 +305,8 @@ static int driver_sqlite_connect(struct sql_db *_db)
 	case SQLITE_OK:
 		db->connected = TRUE;
 		sqlite3_busy_timeout(db->sqlite, sqlite_busy_timeout);
+		if ((flags & SQLITE_OPEN_READONLY) == 0)
+			driver_sqlite_set_pragma_synchronous(_db, db->set->synchronous);
 		driver_sqlite_reopen_prepared_statements(db);
 		return 1;
 	case SQLITE_READONLY:
