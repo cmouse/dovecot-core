@@ -55,8 +55,7 @@ static void test_imap_metadata_verify_entry_name(void)
 	for (i = 0; i < N_ELEMENTS(tests); i++) {
 		const char *error = NULL;
 		bool result = imap_metadata_verify_entry_name(tests[i].name, &error);
-		test_out_reason(t_strdup_printf("case %u: %s", i, tests[i].name),
-				result == tests[i].valid, error);
+		test_assert_idx(result == tests[i].valid, i);
 	}
 	test_end();
 }

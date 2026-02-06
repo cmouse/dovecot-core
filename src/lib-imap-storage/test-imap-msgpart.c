@@ -57,12 +57,10 @@ static void test_imap_msgpart_parse(void)
 	for (i = 0; i < N_ELEMENTS(tests); i++) {
 		struct imap_msgpart *part = NULL;
 		int ret = imap_msgpart_parse(tests[i].section, &part);
-		bool success = (ret == 0);
-		test_out(t_strdup_printf("case %u: %s (success)", i, tests[i].section),
-			 success == tests[i].success);
-		if (success) {
-			test_out(t_strdup_printf("case %u: %s (contains_body)", i, tests[i].section),
-				 imap_msgpart_contains_body(part) == tests[i].contains_body);
+
+		test_assert_idx((ret == 0) == tests[i].success, i);
+		if (ret == 0) {
+			test_assert_idx(imap_msgpart_contains_body(part) == tests[i].contains_body, i);
 			imap_msgpart_free(&part);
 		}
 	}
