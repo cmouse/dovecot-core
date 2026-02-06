@@ -229,7 +229,6 @@ int imap_msgpart_parse(const char *section, struct imap_msgpart **msgpart_r)
 		/* [1.2.3] */
 		if (i > 0 && section[i-1] == '.') {
 			imap_msgpart_free(&msgpart);
-			*msgpart_r = NULL;
 			return -1;
 		}
 		msgpart->section_number = p_strdup(pool, section);
@@ -238,7 +237,6 @@ int imap_msgpart_parse(const char *section, struct imap_msgpart **msgpart_r)
 		/* [1.2.3.MIME], [1.2.3.HEADER], etc */
 		if (section[i-1] != '.') {
 			imap_msgpart_free(&msgpart);
-			*msgpart_r = NULL;
 			return -1;
 		}
 		msgpart->section_number = p_strndup(pool, section, i-1);
@@ -262,7 +260,6 @@ int imap_msgpart_parse(const char *section, struct imap_msgpart **msgpart_r)
 	if (strcmp(section, "MIME") == 0) {
 		if (msgpart->section_number[0] == '\0') {
 			imap_msgpart_free(&msgpart);
-			*msgpart_r = NULL;
 			return -1;
 		}
 		msgpart->fetch_type = FETCH_MIME;
@@ -287,7 +284,6 @@ int imap_msgpart_parse(const char *section, struct imap_msgpart **msgpart_r)
 		}
 		if (ret < 0) {
 			imap_msgpart_free(&msgpart);
-			*msgpart_r = NULL;
 			return -1;
 		}
 		if (msgpart->fetch_type == FETCH_HEADER_FIELDS) {
@@ -299,7 +295,6 @@ int imap_msgpart_parse(const char *section, struct imap_msgpart **msgpart_r)
 			msgpart->wanted_fields |= MAIL_FETCH_STREAM_BODY;
 	} else {
 		imap_msgpart_free(&msgpart);
-		*msgpart_r = NULL;
 		return -1;
 	}
 	return 0;

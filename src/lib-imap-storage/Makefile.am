@@ -28,7 +28,7 @@ test_programs = \
 	test-imap-msgpart \
 	test-imap-metadata
 
-test_imap_msgpart_SOURCES = test-imap-msgpart.c
+test_imap_msgpart_SOURCES = test-imap-msgpart.c test-mocks.c
 test_imap_msgpart_LDADD = \
 	libimap-storage.la \
 	../lib-imap/libimap.la \
@@ -37,7 +37,7 @@ test_imap_msgpart_LDADD = \
 	../lib/liblib.la \
 	$(LIBDOVECOT_TEST_LIBS)
 
-test_imap_metadata_SOURCES = test-imap-metadata.c
+test_imap_metadata_SOURCES = test-imap-metadata.c test-mocks.c
 test_imap_metadata_LDADD = \
 	libimap-storage.la \
 	../lib-imap/libimap.la \

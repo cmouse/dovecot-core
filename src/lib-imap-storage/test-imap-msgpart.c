@@ -5,25 +5,9 @@
 #include "mail-storage.h"
 #include "imap-msgpart.h"
 
-/* Mocks */
-int mail_get_parts(struct mail *mail ATTR_UNUSED, struct message_part **parts_r ATTR_UNUSED) { return -1; }
-int mail_get_binary_properties(struct mail *mail ATTR_UNUSED, const struct message_part *part ATTR_UNUSED, bool include_hdr ATTR_UNUSED, struct mail_binary_properties *props_r ATTR_UNUSED) { return -1; }
-int mail_get_binary_stream(struct mail *mail ATTR_UNUSED, const struct message_part *part ATTR_UNUSED, bool include_hdr ATTR_UNUSED, struct mail_binary_properties *props_r ATTR_UNUSED, struct istream **stream_r ATTR_UNUSED) { return -1; }
-int mail_get_stream_because(struct mail *mail ATTR_UNUSED, struct message_size *hdr_size ATTR_UNUSED, struct message_size *body_size ATTR_UNUSED, const char *reason ATTR_UNUSED, struct istream **stream_r ATTR_UNUSED) { return -1; }
-int mail_get_hdr_stream(struct mail *mail ATTR_UNUSED, struct message_size *hdr_size ATTR_UNUSED, struct istream **stream_r ATTR_UNUSED) { return -1; }
-int mail_get_virtual_size(struct mail *mail ATTR_UNUSED, uoff_t *size_r ATTR_UNUSED) { return -1; }
-int mail_get_physical_size(struct mail *mail ATTR_UNUSED, uoff_t *size_r ATTR_UNUSED) { return -1; }
-int mail_get_header_stream(struct mail *mail ATTR_UNUSED, struct mailbox_header_lookup_ctx *headers ATTR_UNUSED, struct istream **stream_r ATTR_UNUSED) { return -1; }
-struct mailbox_header_lookup_ctx *mailbox_header_lookup_init(struct mailbox *box ATTR_UNUSED, const char *const headers[] ATTR_UNUSED) { return NULL; }
-void mailbox_header_lookup_unref(struct mailbox_header_lookup_ctx **ctx) { *ctx = NULL; }
-void mail_set_critical(struct mail *mail ATTR_UNUSED, const char *fmt ATTR_UNUSED, ...) { }
-void mail_add_temp_wanted_fields(struct mail *mail ATTR_UNUSED, enum mail_fetch_field field ATTR_UNUSED, struct mailbox_header_lookup_ctx *headers ATTR_UNUSED) {}
-int mail_get_special(struct mail *mail ATTR_UNUSED, enum mail_fetch_field field ATTR_UNUSED, const char **value_r ATTR_UNUSED) { return -1; }
-void mail_set_cache_corrupted(struct mail *mail ATTR_UNUSED, enum mail_fetch_field field ATTR_UNUSED, const char *reason ATTR_UNUSED) {}
-
 static void test_imap_msgpart_parse(void)
 {
-	struct {
+	const struct {
 		const char *section;
 		bool success;
 		bool contains_body;
@@ -69,7 +53,7 @@ static void test_imap_msgpart_parse(void)
 
 int main(void)
 {
-	static void (*const test_functions[])(void) = {
+	void (*const test_functions[])(void) = {
 		test_imap_msgpart_parse,
 		NULL
 	};
