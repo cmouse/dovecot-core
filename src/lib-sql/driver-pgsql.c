@@ -136,6 +136,13 @@ struct pgsql_db_cache {
 	const struct pgsql_settings *set;
 };
 
+struct pgsql_query_params {
+	int count;
+	const char **values;
+	int *lengths;
+	int *formats;
+};
+
 extern const struct sql_db driver_pgsql_db;
 extern const struct sql_result driver_pgsql_result;
 
@@ -690,7 +697,8 @@ static void query_timeout(struct pgsql_result *result)
 	result_finish(result);
 }
 
-static void do_query(struct pgsql_result *result, const char *query)
+static void do_query(struct pgsql_result *result, const char *query,
+		     const struct pgsql_query_params *params)
 {
 	struct pgsql_db *db =
 		container_of(result->api.db, struct pgsql_db, api);
@@ -707,7 +715,9 @@ static void do_query(struct pgsql_result *result, const char *query)
 				 query_timeout, result);
 	result->query = i_strdup(query);
 
-	if (PQsendQuery(db->pg, query) == 0 ||
+	if (PQsendQueryParams(db->pg, query, params->count, NULL,
+			      params->values, params->lengths,
+			      params->formats, 0) == 0 ||
 	    (ret = PQflush(db->pg)) < 0) {
 		/* failed to send query */
 		result_finish(result);
@@ -762,6 +772,8 @@ static void exec_callback(struct sql_result *_result,
 static void driver_pgsql_exec(struct sql_db *db, const char *query)
 {
 	struct pgsql_result *result;
+	struct pgsql_query_params params;
+	i_zero(&params);
 
 	result = i_new(struct pgsql_result, 1);
 	result->api = driver_pgsql_result;
@@ -769,13 +781,15 @@ static void driver_pgsql_exec(struct sql_db *db, const char *query)
 	result->api.refcount = 1;
 	result->api.event = event_create(db->event);
 	result->callback = exec_callback;
-	do_query(result, query);
+	do_query(result, query, &params);
 }
 
 static void driver_pgsql_query(struct sql_db *db, const char *query,
 			       sql_query_callback_t *callback, void *context)
 {
 	struct pgsql_result *result;
+	struct pgsql_query_params params;
+	i_zero(&params);
 
 	result = i_new(struct pgsql_result, 1);
 	result->api = driver_pgsql_result;
@@ -784,7 +798,7 @@ static void driver_pgsql_query(struct sql_db *db, const char *query,
 	result->api.event = event_create(db->event);
 	result->callback = callback;
 	result->context = context;
-	do_query(result, query);
+	do_query(result, query, &params);
 }
 
 static void pgsql_query_s_callback(struct sql_result *result, void *context)
