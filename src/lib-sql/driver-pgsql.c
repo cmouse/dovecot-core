@@ -844,7 +844,8 @@ static void driver_pgsql_sync_deinit(struct pgsql_db *db)
 }
 
 static struct sql_result *
-driver_pgsql_sync_query(struct pgsql_db *db, const char *query)
+driver_pgsql_sync_query(struct pgsql_db *db, const char *query,
+			struct pgsql_query_params *params)
 {
 	struct sql_result *result;
 
@@ -861,7 +862,13 @@ driver_pgsql_sync_query(struct pgsql_db *db, const char *query)
 		break;
 	}
 
-	driver_pgsql_query(&db->api, query, pgsql_query_s_callback, db);
+	result = new_result(&db->api);
+	struct pgsql_result *pg_result =
+		container_of(result, struct pgsql_result, api);
+	pg_result->callback = pgsql_query_s_callback;
+	pg_result->context = db;
+	do_query(pg_result, query, params);
+
 	if (db->sync_result == NULL)
 		io_loop_run(db->ioloop);
 
@@ -886,9 +893,11 @@ driver_pgsql_query_s(struct sql_db *_db, const char *query)
 {
 	struct pgsql_db *db = container_of(_db, struct pgsql_db, api);
 	struct sql_result *result;
+	struct pgsql_query_params params;
+	i_zero(&params);
 
 	driver_pgsql_sync_init(db);
-	result = driver_pgsql_sync_query(db, query);
+	result = driver_pgsql_sync_query(db, query, &params);
 	driver_pgsql_sync_deinit(db);
 	return result;
 }
@@ -1299,8 +1308,10 @@ driver_pgsql_transaction_commit_multi(struct pgsql_transaction_context *ctx)
 	struct pgsql_db *db = container_of(ctx->ctx.db, struct pgsql_db, api);
 	struct sql_result *result;
 	struct sql_transaction_query *query;
+	struct pgsql_query_params params;
+	i_zero(&params);
 
-	result = driver_pgsql_sync_query(db, "BEGIN");
+	result = driver_pgsql_sync_query(db, "BEGIN", &params);
 	if (sql_result_next_row(result) < 0) {
 		commit_multi_fail(ctx, result, "BEGIN");
 		return NULL;
@@ -1309,7 +1320,7 @@ driver_pgsql_transaction_commit_multi(struct pgsql_transaction_context *ctx)
 
 	/* send queries */
 	for (query = ctx->ctx.head; query != NULL; query = query->next) {
-		result = driver_pgsql_sync_query(db, query->query);
+		result = driver_pgsql_sync_query(db, query->query, &params);
 		if (sql_result_next_row(result) < 0) {
 			commit_multi_fail(ctx, result, query->query);
 			break;
@@ -1326,7 +1337,7 @@ driver_pgsql_transaction_commit_multi(struct pgsql_transaction_context *ctx)
 	}
 
 	return driver_pgsql_sync_query(db, ctx->failed ?
-				       "ROLLBACK" : "COMMIT");
+				       "ROLLBACK" : "COMMIT", &params);
 }
 
 static void
