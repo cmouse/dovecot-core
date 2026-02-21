@@ -78,6 +78,14 @@ struct sqlpool_transaction_context {
 	struct sqlpool_request *commit_request;
 };
 
+struct sqlpool_statement {
+	struct sql_statement api;
+	const struct sqlpool_connection *conn;
+	struct sql_statement *stmt;
+
+	bool failed:1;
+};
+
 extern struct sql_db driver_sqlpool_db;
 
 static struct sqlpool_connection *
@@ -863,6 +871,144 @@ static void driver_sqlpool_wait(struct sql_db *_db)
 		sql_wait(conn->db);
 }
 
+static struct sql_statement *
+driver_sqlpool_statement_init(struct sql_db *_db, const char *query_template)
+{
+	struct sqlpool_db *db = container_of(_db, struct sqlpool_db, api);
+	pool_t pool = pool_alloconly_create("sqlpool statement", 256);
+	struct sqlpool_statement *pool_stmt =
+		p_new(pool, struct sqlpool_statement, 1);
+	pool_stmt->api.pool = pool;
+	pool_stmt->api.query_template = p_strdup(pool, query_template);
+
+	if (driver_sqlpool_get_connection(db, UINT_MAX, &pool_stmt->conn) == FALSE)
+		pool_stmt->failed = TRUE;
+	else {
+		pool_stmt->stmt =
+			sql_statement_init(pool_stmt->conn->db, query_template);
+	}
+	return &pool_stmt->api;
+}
+
+static void driver_sqlpool_statement_abort(struct sql_statement *_stmt)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed)
+		return;
+
+	sql_statement_abort(&pool_stmt->stmt);
+	pool_unref(&pool_stmt->api.pool);
+}
+
+static void
+driver_sqlpool_statement_bind_str(struct sql_statement *_stmt, unsigned int column_idx,
+				  const char *value)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed)
+		return;
+
+	struct sql_statement *stmt = pool_stmt->stmt;
+	sql_statement_bind_str(stmt, column_idx, value);
+}
+
+static void
+driver_sqlpool_statement_bind_uuid(struct sql_statement *_stmt, unsigned int column_idx,
+				   const guid_128_t value)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed)
+		return;
+
+	struct sql_statement *stmt = pool_stmt->stmt;
+	sql_statement_bind_uuid(stmt, column_idx, value);
+}
+
+static void
+driver_sqlpool_statement_bind_binary(struct sql_statement *_stmt, unsigned int column_idx,
+				     const void *value, size_t value_len)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed)
+		return;
+
+	struct sql_statement *stmt = pool_stmt->stmt;
+	sql_statement_bind_binary(stmt, column_idx, value, value_len);
+}
+
+static void
+driver_sqlpool_statement_bind_int64(struct sql_statement *_stmt, unsigned int column_idx,
+				    int64_t value)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed)
+		return;
+
+	struct sql_statement *stmt = pool_stmt->stmt;
+	sql_statement_bind_int64(stmt, column_idx, value);
+}
+
+static void
+driver_sqlpool_statement_bind_double(struct sql_statement *_stmt, unsigned int column_idx,
+				     double value)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed)
+		return;
+
+	struct sql_statement *stmt = pool_stmt->stmt;
+	sql_statement_bind_double(stmt, column_idx, value);
+}
+
+static struct sql_result *
+driver_sqlpool_statement_query_s(struct sql_statement *_stmt)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed) {
+		sql_not_connected_result.refcount++;
+		return &sql_not_connected_result;
+	}
+	struct sql_statement *stmt = pool_stmt->stmt;
+	stmt->args = pool_stmt->api.args;
+
+	return sql_statement_query_s(&pool_stmt->stmt);
+}
+
+static void
+driver_sqlpool_statement_query(struct sql_statement *_stmt,
+			       sql_query_callback_t *callback, void *context)
+{
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+	if (pool_stmt->failed) {
+		sql_not_connected_result.refcount++;
+		callback(&sql_not_connected_result, context);
+		return;
+	}
+#undef sql_statement_query
+	sql_statement_query(&pool_stmt->stmt, callback, context);
+}
+
+static void
+driver_sqlpool_update_stmt(struct sql_transaction_context *_ctx,
+			   struct sql_statement *_stmt,
+			   unsigned int *affected_rows)
+{
+        struct sqlpool_transaction_context *ctx =
+                (struct sqlpool_transaction_context *)_ctx;
+	struct sqlpool_statement *pool_stmt =
+		container_of(_stmt, struct sqlpool_statement, api);
+
+	sql_transaction_add_stmt(&ctx->ctx, ctx->query_pool, pool_stmt->stmt, affected_rows);
+}
+
 struct sql_db driver_sqlpool_db = {
 	"",
 
@@ -885,5 +1031,17 @@ struct sql_db driver_sqlpool_db = {
 		.update = driver_sqlpool_update,
 
 		.escape_blob = driver_sqlpool_escape_blob,
+
+		.statement_init = driver_sqlpool_statement_init,
+		.statement_abort = driver_sqlpool_statement_abort,
+		.statement_bind_str = driver_sqlpool_statement_bind_str,
+		.statement_bind_uuid = driver_sqlpool_statement_bind_uuid,
+		.statement_bind_int64 = driver_sqlpool_statement_bind_int64,
+		.statement_bind_binary = driver_sqlpool_statement_bind_binary,
+		.statement_bind_double = driver_sqlpool_statement_bind_double,
+		.statement_query_s = driver_sqlpool_statement_query_s,
+		.statement_query = driver_sqlpool_statement_query,
+
+		.update_stmt = driver_sqlpool_update_stmt,
 	}
 };
