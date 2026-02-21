@@ -181,8 +181,7 @@ void sql_ref(struct sql_db *db)
 	db->refcount++;
 }
 
-static void
-default_sql_prepared_statement_deinit(struct sql_prepared_statement *prep_stmt)
+void default_sql_prepared_statement_deinit(struct sql_prepared_statement *prep_stmt)
 {
 	i_free(prep_stmt->query_template);
 	i_free(prep_stmt);
@@ -318,7 +317,7 @@ struct sql_result *sql_query_s(struct sql_db *db, const char *query)
 	return db->v.query_s(db, query);
 }
 
-static struct sql_prepared_statement *
+struct sql_prepared_statement *
 default_sql_prepared_statement_init(struct sql_db *db,
 				    const char *query_template)
 {
@@ -373,8 +372,7 @@ const char *sql_statement_get_query(struct sql_statement *stmt)
 	return str_c(query);
 }
 
-static void
-default_sql_statement_query(struct sql_statement *stmt,
+void default_sql_statement_query(struct sql_statement *stmt,
 			    sql_query_callback_t *callback, void *context)
 {
 	sql_query(stmt->db, sql_statement_get_query(stmt),
@@ -382,8 +380,7 @@ default_sql_statement_query(struct sql_statement *stmt,
 	pool_unref(&stmt->pool);
 }
 
-static struct sql_result *
-default_sql_statement_query_s(struct sql_statement *stmt)
+struct sql_result *default_sql_statement_query_s(struct sql_statement *stmt)
 {
 	struct sql_result *result =
 		sql_query_s(stmt->db, sql_statement_get_query(stmt));
@@ -391,7 +388,7 @@ default_sql_statement_query_s(struct sql_statement *stmt)
 	return result;
 }
 
-static void default_sql_update_stmt(struct sql_transaction_context *ctx,
+void default_sql_update_stmt(struct sql_transaction_context *ctx,
 				    struct sql_statement *stmt,
 				    unsigned int *affected_rows)
 {
