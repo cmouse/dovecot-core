@@ -943,6 +943,23 @@ void sql_transaction_add_query(struct sql_transaction_context *ctx, pool_t pool,
 	ctx->tail = tquery;
 }
 
+void sql_transaction_add_stmt(struct sql_transaction_context *ctx, pool_t pool,
+			      struct sql_statement *stmt, unsigned int *affected_rows)
+{
+	struct sql_transaction_query *tquery;
+
+	tquery = p_new(pool, struct sql_transaction_query, 1);
+	tquery->trans = ctx;
+	tquery->stmt = stmt;
+	tquery->affected_rows = affected_rows;
+
+	if (ctx->head == NULL)
+		ctx->head = tquery;
+	else
+		ctx->tail->next = tquery;
+	ctx->tail = tquery;
+}
+
 void sql_connection_log_finished(struct sql_db *db)
 {
 	struct event_passthrough *e = event_create_passthrough(db->event)->
