@@ -94,6 +94,27 @@ struct pgsql_binary_value {
 	size_t size;
 };
 
+enum pgsql_param_type {
+	PGSQL_PARAM_STR,
+	PGSQL_PARAM_BINARY,
+	PGSQL_PARAM_INT,
+	PGSQL_PARAM_DOUBLE,
+};
+
+struct pgsql_param {
+	enum pgsql_param_type type;
+
+	const char *value_str;
+	int value_len;
+
+	bool binary;
+};
+
+struct pgsql_statement {
+	struct sql_statement api;
+	ARRAY(struct pgsql_param) args;
+};
+
 struct pgsql_result {
 	struct sql_result api;
 
@@ -1476,6 +1497,250 @@ static void driver_pgsql_wait(struct sql_db *_db)
 	io_loop_destroy(&db->ioloop);
 }
 
+static struct sql_statement *
+driver_pgsql_statement_init(struct sql_db *_db, const char *query_template)
+{
+	pool_t pool = pool_alloconly_create("pgsql statement", 128);
+	struct pgsql_statement *stmt = p_new(pool, struct pgsql_statement, 1);
+	stmt->api.pool = pool;
+	stmt->api.query_template = p_strdup(pool, query_template);
+	stmt->api.db = _db;
+
+	p_array_init(&stmt->args, pool, 1);
+
+	return &stmt->api;
+}
+
+static void
+driver_pgsql_statement_abort(struct sql_statement *_stmt)
+{
+	pool_unref(&_stmt->pool);
+}
+
+static void
+populate_stmt_params(struct pgsql_statement *stmt, struct pgsql_query_params *params_r)
+{
+	i_zero(params_r);
+	unsigned int count;
+	const struct pgsql_param *params = array_get(&stmt->args, &count);
+	if (count == 0)
+		return;
+	params_r->count = count;
+	params_r->values = t_new(const char *, count);
+	params_r->formats = t_new(int, count);
+	params_r->lengths = t_new(int, count);
+
+	for (unsigned int i = 0; i < count; i++) {
+		const struct pgsql_param *param = params+i;
+		if (param->binary)
+			params_r->formats[i] = 1;
+		params_r->values[i] = param->value_str;
+		params_r->lengths[i] = param->value_len;
+	}
+}
+
+/* Checks that placeholder looks like it's surrounded by sensible
+ * characters, like simple whitespace, comparator or brace. */
+static bool is_placeholder(const char *start, const char *p)
+{
+	if (p > start) {
+		if (strchr(",<>= \t(", p[-1]) == NULL)
+			return FALSE;
+	}
+	if (strchr(",<>= \t)", p[1]) == NULL)
+		return FALSE;
+	return TRUE;
+}
+
+/* Attempt to find and replace one placeholder with a parameter */
+static bool try_replace_placeholder(string_t *ret, const char **_tpl,
+				    unsigned int *counter,
+				    const struct pgsql_param *param)
+{
+	const char *tpl = *_tpl;
+	/* This loop will be executed until a placeholder is found
+	 * or no placeholder candidates can be found */
+	for (;;) {
+		const char *p;
+		/* Stop searching if no placeholder can be found */
+		if ((p = strchr(tpl, '?')) == NULL)
+			return FALSE;
+		/* Append whatever was found before */
+		str_append_data(ret, tpl, p - tpl);
+		/* If the found placeholder is not surrounded by
+		 * whitespace or other suitable characters, try again */
+		if (!is_placeholder(tpl, p)) {
+			str_append_c(ret, *p);
+			tpl = p + 1;
+			continue;
+		}
+		/* Add parameter with type suffix */
+		const char *suffix;
+		switch (param->type) {
+		case PGSQL_PARAM_STR:
+			suffix = "::varchar";
+			break;
+		case PGSQL_PARAM_BINARY:
+			suffix = "::bytea";
+			break;
+		case PGSQL_PARAM_INT:
+			suffix = "::int8";
+			break;
+		case PGSQL_PARAM_DOUBLE:
+			suffix = "::float8";
+			break;
+		default:
+			i_unreached();
+		}
+		/* Replace ? with a parameter */
+		str_printfa(ret, "$%d%s", ++(*counter), suffix);
+		tpl = p + 1;
+		break;
+	}
+	*_tpl = tpl;
+	return TRUE;
+}
+
+/* Converts ? template into postgres parameter template */
+static const char *convert_query_template(const struct pgsql_statement *stmt)
+{
+	const char *tpl = stmt->api.query_template;
+	if (strchr(tpl, '?') == NULL)
+		return tpl;
+
+	string_t *ret = t_str_new(strlen(tpl));
+
+	const struct pgsql_param *param;
+	unsigned int counter = 0;
+
+	array_foreach(&stmt->args, param) {
+		/* We expect to find '?', but ignore anything surrounded
+		   by unexpected characters. */
+		if (!try_replace_placeholder(ret, &tpl, &counter, param))
+			break;
+	}
+	str_append(ret, tpl);
+	return str_c(ret);
+}
+
+static struct sql_result *
+driver_pgsql_statement_query_s(struct sql_statement *_stmt)
+{
+	struct pgsql_statement *stmt =
+		container_of(_stmt, struct pgsql_statement, api);
+	struct pgsql_db *db = container_of(_stmt->db, struct pgsql_db, api);
+	struct pgsql_query_params params;
+	const char *query;
+	struct sql_result *result;
+
+	populate_stmt_params(stmt, &params);
+	query = convert_query_template(stmt);
+
+	driver_pgsql_sync_init(db);
+	result = driver_pgsql_sync_query(db, query, &params);
+	driver_pgsql_sync_deinit(db);
+
+	return result;
+}
+
+static void
+driver_pgsql_statement_query(struct sql_statement *_stmt,
+			     sql_query_callback_t *callback, void *context)
+{
+	struct pgsql_statement *stmt =
+		container_of(_stmt, struct pgsql_statement, api);
+	struct pgsql_db *db = container_of(_stmt->db, struct pgsql_db, api);
+	struct pgsql_query_params params;
+	const char *query;
+	struct pgsql_result *result;
+
+	populate_stmt_params(stmt, &params);
+	query = convert_query_template(stmt);
+	result = container_of(new_result(&db->api), struct pgsql_result, api);
+	result->callback = callback;
+	result->context = context;
+
+	do_query(result, query, &params);
+}
+
+static void
+driver_pgsql_statement_bind_str(struct sql_statement *_stmt,
+				unsigned int column_idx, const char *value)
+{
+	struct pgsql_statement *stmt =
+		container_of(_stmt, struct pgsql_statement, api);
+
+	struct pgsql_param *param = array_idx_get_space(&stmt->args, column_idx);
+	param->type = PGSQL_PARAM_STR;
+	param->value_str = p_strdup(stmt->api.pool, value);
+	param->value_len = strlen(value);
+}
+
+static void
+driver_pgsql_statement_bind_uuid(struct sql_statement *_stmt,
+				 unsigned int column_idx, const guid_128_t value)
+{
+	const char *guid = guid_128_to_uuid_string(value, FORMAT_RECORD);
+	driver_pgsql_statement_bind_str(_stmt, column_idx, guid);
+}
+
+static void
+driver_pgsql_statement_bind_binary(struct sql_statement *_stmt,
+				   unsigned int column_idx, const void *value,
+				   size_t value_len)
+{
+	struct pgsql_statement *stmt =
+		container_of(_stmt, struct pgsql_statement, api);
+
+	i_assert(value_len <= INT_MAX);
+
+	struct pgsql_param *param = array_idx_get_space(&stmt->args, column_idx);
+	string_t *bytea = str_new(stmt->api.pool, value_len * 2 + 2);
+	str_append(bytea, "\\x");;
+	binary_to_hex_append(bytea, value, value_len);
+	param->type = PGSQL_PARAM_BINARY;
+	param->value_str = str_c(bytea);
+	param->value_len = value_len;
+}
+
+static void
+driver_pgsql_statement_bind_int64(struct sql_statement *_stmt,
+				  unsigned int column_idx, int64_t value)
+{
+	struct pgsql_statement *stmt =
+		container_of(_stmt, struct pgsql_statement, api);
+
+	struct pgsql_param *param = array_idx_get_space(&stmt->args, column_idx);
+	param->type = PGSQL_PARAM_STR;
+	param->value_str = p_strdup_printf(stmt->api.pool, "%jd", value);
+	param->value_len = strlen(param->value_str);
+}
+
+static void
+driver_pgsql_statement_bind_double(struct sql_statement *_stmt,
+				   unsigned int column_idx, double value)
+{
+	struct pgsql_statement *stmt =
+		container_of(_stmt, struct pgsql_statement, api);
+
+	struct pgsql_param *param = array_idx_get_space(&stmt->args, column_idx);
+	param->type = PGSQL_PARAM_STR;
+	param->value_str = p_strdup_printf(stmt->api.pool, "%lf", value);
+	param->value_len = strlen(param->value_str);
+}
+
+static void
+driver_pgsql_update_stmt(struct sql_transaction_context *_ctx,
+		         struct sql_statement *_stmt,
+			 unsigned int *affected_rows)
+{
+	struct pgsql_transaction_context *ctx =
+		container_of(_ctx, struct pgsql_transaction_context, ctx);
+	pool_add_external_ref(_stmt->pool, ctx->query_pool);
+	pool_unref(&_stmt->pool);
+	sql_transaction_add_stmt(_ctx, ctx->query_pool, _stmt, affected_rows);
+}
+
 const struct sql_db driver_pgsql_db = {
 	.name = "pgsql",
 	.flags = SQL_DB_FLAG_POOLED,
@@ -1500,6 +1765,21 @@ const struct sql_db driver_pgsql_db = {
 		.update = driver_pgsql_update,
 
 		.escape_blob = driver_pgsql_escape_blob,
+
+
+		.statement_init = driver_pgsql_statement_init,
+		.statement_abort = driver_pgsql_statement_abort,
+
+		.statement_bind_str = driver_pgsql_statement_bind_str,
+		.statement_bind_binary = driver_pgsql_statement_bind_binary,
+		.statement_bind_int64 = driver_pgsql_statement_bind_int64,
+		.statement_bind_double = driver_pgsql_statement_bind_double,
+		.statement_bind_uuid = driver_pgsql_statement_bind_uuid,
+
+		.statement_query_s = driver_pgsql_statement_query_s,
+		.statement_query = driver_pgsql_statement_query,
+
+		.update_stmt = driver_pgsql_update_stmt,
 	}
 };
 
