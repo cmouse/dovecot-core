@@ -53,6 +53,7 @@ struct sqlite_transaction_context {
 	struct sql_transaction_context ctx;
 	int rc;
 	char *error;
+	pool_t query_pool;
 };
 
 /* <settings checks> */
@@ -748,10 +749,25 @@ driver_sqlite_transaction_begin(struct sql_db *_db)
 	ctx->rc = SQLITE_OK;
 	ctx->ctx.db = _db;
 	ctx->ctx.event = event_create(_db->event);
-
-	driver_sqlite_transaction_exec(ctx, "BEGIN TRANSACTION");
+	ctx->query_pool =
+		pool_alloconly_create("sqlite transaction"MEMPOOL_GROWING, 64);
 
 	return &ctx->ctx;
+}
+
+static void driver_sqlite_transaction_free(struct sqlite_transaction_context *ctx)
+{
+	/* ensure all statements are aborted */
+	while (ctx->ctx.head != NULL) {
+		if (ctx->ctx.head->stmt != NULL)
+			sql_statement_abort(&ctx->ctx.head->stmt);
+		ctx->ctx.head = ctx->ctx.head->next;
+	}
+
+	pool_unref(&ctx->query_pool);
+	event_unref(&ctx->ctx.event);
+	i_free(ctx->error);
+	i_free(ctx);
 }
 
 static void
@@ -773,9 +789,7 @@ driver_sqlite_transaction_rollback(struct sql_transaction_context *_ctx)
 			add_int("error_code", rc)->event(),
 			"Transaction rollback failed");
 	}
-	event_unref(&_ctx->event);
-	i_free(ctx->error);
-	i_free(ctx);
+	driver_sqlite_transaction_free(ctx);
 }
 
 static int
@@ -784,6 +798,45 @@ driver_sqlite_transaction_commit_s(struct sql_transaction_context *_ctx,
 {
 	struct sqlite_transaction_context *ctx =
 		container_of(_ctx, struct sqlite_transaction_context, ctx);
+	struct sqlite_db *db = container_of(_ctx->db, struct sqlite_db, api);
+	/* start transaction */
+	driver_sqlite_transaction_exec(ctx, "BEGIN TRANSACTION");
+	if (!SQLITE_IS_OK(ctx->rc)) {
+		e_debug(sql_transaction_finished_event(_ctx)->
+			add_str("error", ctx->error)->event(),
+			"Transaction failed: %s", ctx->error);
+		*error_r = t_strdup(ctx->error);
+		driver_sqlite_transaction_rollback(_ctx);
+		return -1;
+	}
+
+	/* execute all quries et al */
+	while (_ctx->head != NULL) {
+		struct sql_result *res;
+		if (_ctx->head->stmt != NULL)
+			res = sql_statement_query_s(&_ctx->head->stmt);
+		else
+			res = sql_query_s(_ctx->db, _ctx->head->query);
+		/* neded to actually execute the query */
+		while (driver_sqlite_result_next_row(res) > 0);
+		struct sqlite_result *sq_res =
+			container_of(res, struct sqlite_result, api);
+
+		if (!SQLITE_IS_OK(sq_res->rc)) {
+			struct sqlite_result *sq_res =
+				container_of(res, struct sqlite_result, api);
+			ctx->rc = sq_res->rc;
+			ctx->error = i_strdup(sq_res->error);
+		} else {
+			/* determine affected rows */
+			if (_ctx->head->affected_rows != NULL)
+				*_ctx->head->affected_rows = sqlite3_changes(db->sqlite);
+		}
+		sql_result_unref(res);
+		if (!SQLITE_IS_OK(ctx->rc))
+			break;
+		_ctx->head = _ctx->head->next;
+	}
 
 	/* If context has already failed, commit won't be run */
 	driver_sqlite_transaction_exec(ctx, "COMMIT");
@@ -797,8 +850,7 @@ driver_sqlite_transaction_commit_s(struct sql_transaction_context *_ctx,
 	}
 	e_debug(sql_transaction_finished_event(_ctx)->event(),
 		"Transaction committed");
-	event_unref(&_ctx->event);
-	i_free(ctx);
+	driver_sqlite_transaction_free(ctx);
 	return 0;
 }
 
@@ -808,14 +860,8 @@ driver_sqlite_update(struct sql_transaction_context *_ctx, const char *query,
 {
 	struct sqlite_transaction_context *ctx =
 		container_of(_ctx, struct sqlite_transaction_context, ctx);
-	struct sqlite_db *db = container_of(_ctx->db, struct sqlite_db, api);
 
-	if (!SQLITE_IS_OK(ctx->rc))
-		return;
-
-	driver_sqlite_transaction_exec(ctx, query);
-	if (ctx->rc == SQLITE_OK && affected_rows != NULL)
-		*affected_rows = sqlite3_changes(db->sqlite);
+	sql_transaction_add_query(_ctx, ctx->query_pool, query, affected_rows);
 }
 
 static const char *
@@ -925,24 +971,8 @@ driver_sqlite_update_stmt(struct sql_transaction_context *_ctx,
 {
 	struct sqlite_transaction_context *ctx =
 		container_of(_ctx, struct sqlite_transaction_context, ctx);
-	struct sqlite_db *db =
-		container_of(_ctx->db, struct sqlite_db, api);
-	struct sqlite_statement *stmt =
-		container_of(_stmt, struct sqlite_statement, api);
-	/* execute statement */
-	struct sql_result *_res = driver_sqlite_statement_query_s(&stmt->api);
-	struct sqlite_result *res =
-		container_of(_res, struct sqlite_result, api);
-	if (sql_result_next_row(_res) < 0) {
-		ctx->rc = res->rc;
-		i_free(ctx->error);
-		ctx->error = i_strdup(driver_sqlite_result_str(stmt->api.db, ctx->rc));
-		if (affected_rows != NULL)
-			*affected_rows = 0;
-	} else if (SQLITE_IS_OK(res->rc) && affected_rows != NULL)
-		*affected_rows = sqlite3_changes(db->sqlite);
 
-	sql_result_unref(_res);
+	sql_transaction_add_stmt(_ctx, ctx->query_pool, _stmt, affected_rows);
 }
 
 const struct sql_db driver_sqlite_db = {

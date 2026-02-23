@@ -63,22 +63,58 @@ static void test_sql_sqlite(void)
 
 	sql_result_unref(cursor);
 
-	struct sql_prepared_statement *prep_stmt =
-		sql_prepared_statement_init(sql, "INSERT INTO bar VALUES(?)");
-	struct sql_statement *stmt =
-		sql_statement_init_prepared(prep_stmt);
-	sql_statement_bind_str(stmt, 0, "value3");
-	cursor = sql_statement_query_s(&stmt);
-	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_LAST);
-	sql_result_unref(cursor);
+	/* reset bar */
+	sql_exec(sql, "DELETE FROM bar");
 
-	stmt = sql_statement_init(sql, "SELECT foo FROM bar WHERE foo = ?");
-	sql_statement_bind_str(stmt, 0, "value3");
-	cursor = sql_statement_query_s(&stmt);
+	/* insert data using statements */
+	t = sql_transaction_begin(sql);
+	struct sql_statement *stmt = sql_statement_init(sql, "INSERT INTO bar VALUES(?)");
+	sql_statement_bind_str(stmt, 0, "value1");
+	sql_update_stmt(t, &stmt);
+	stmt = sql_statement_init(sql, "INSERT INTO bar VALUES(?)");
+	sql_statement_bind_str(stmt, 0, "value2");
+	sql_update_stmt(t, &stmt);
+	test_assert(sql_transaction_commit_s(&t, &error) == 0);
+	cursor = sql_query_s(sql, "SELECT foo FROM bar");
+
 	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_OK);
 	test_assert_ucmp(sql_result_get_fields_count(cursor), ==, 1);
 	test_assert_strcmp(sql_result_get_field_name(cursor, 0), "foo");
-	test_assert_strcmp(sql_result_get_field_value(cursor, 0), "value3");
+	test_assert_strcmp(sql_result_get_field_value(cursor, 0), "value1");
+	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_OK);
+	test_assert_ucmp(sql_result_get_fields_count(cursor), ==, 1);
+	test_assert_strcmp(sql_result_get_field_name(cursor, 0), "foo");
+	test_assert_strcmp(sql_result_get_field_value(cursor, 0), "value2");
+	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_LAST);
+
+	sql_result_unref(cursor);
+
+	/* reset bar */
+	sql_exec(sql, "DELETE FROM bar");
+
+	/* insert data using prepared statements */
+	t = sql_transaction_begin(sql);
+	struct sql_prepared_statement *prep_stmt =
+		sql_prepared_statement_init(sql, "INSERT INTO bar VALUES(?)");
+	stmt = sql_statement_init_prepared(prep_stmt);
+	sql_statement_bind_str(stmt, 0, "value1");
+	sql_update_stmt(t, &stmt);
+	stmt = sql_statement_init_prepared(prep_stmt);
+	sql_statement_bind_str(stmt, 0, "value2");
+	sql_update_stmt(t, &stmt);
+	test_assert(sql_transaction_commit_s(&t, &error) == 0);
+	cursor = sql_query_s(sql, "SELECT foo FROM bar");
+
+	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_OK);
+	test_assert_ucmp(sql_result_get_fields_count(cursor), ==, 1);
+	test_assert_strcmp(sql_result_get_field_name(cursor, 0), "foo");
+	test_assert_strcmp(sql_result_get_field_value(cursor, 0), "value1");
+	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_OK);
+	test_assert_ucmp(sql_result_get_fields_count(cursor), ==, 1);
+	test_assert_strcmp(sql_result_get_field_name(cursor, 0), "foo");
+	test_assert_strcmp(sql_result_get_field_value(cursor, 0), "value2");
+	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_LAST);
+
 	sql_result_unref(cursor);
 	sql_prepared_statement_unref(&prep_stmt);
 
@@ -114,14 +150,21 @@ static void test_sql_sqlite(void)
 	prep_stmt = sql_prepared_statement_init(sql, "SELECT foo FROM bar WHERE foo = ?");
 	sql_disconnect(sql);
 	stmt = sql_statement_init_prepared(prep_stmt);
-	sql_statement_bind_str(stmt, 0, "value3");
+	sql_statement_bind_str(stmt, 0, "value2");
 	cursor = sql_statement_query_s(&stmt);
 	test_assert(sql_result_next_row(cursor) == SQL_RESULT_NEXT_OK);
 	test_assert_ucmp(sql_result_get_fields_count(cursor), ==, 1);
 	test_assert_strcmp(sql_result_get_field_name(cursor, 0), "foo");
-	test_assert_strcmp(sql_result_get_field_value(cursor, 0), "value3");
+	test_assert_strcmp(sql_result_get_field_value(cursor, 0), "value2");
 	sql_result_unref(cursor);
 	sql_prepared_statement_unref(&prep_stmt);
+
+	/* test that failures are handled properly */
+	t = sql_transaction_begin(sql);
+	sql_update(t, "INSERT INTO bar VALUES(\"value1\", 2)");
+	sql_update(t, "INSERT INTO bar VALUES(\"value2\", 3)");
+	test_assert(sql_transaction_commit_s(&t, &error) == -1);
+	test_assert_strcmp(error, "SQL logic error (rc=1, errno=0)");
 
 	sql_unref(&sql);
 	driver_sqlite_deinit();
