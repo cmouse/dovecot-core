@@ -769,17 +769,23 @@ static void exec_callback(struct sql_result *_result,
 	result_finish(result);
 }
 
+static struct sql_result *new_result(struct sql_db *db)
+{
+	struct pgsql_result *result = i_new(struct pgsql_result, 1);
+	result->api = driver_pgsql_result;
+	result->api.db = db;
+	result->api.refcount = 1;
+	result->api.event = event_create(db->event);
+	return &result->api;
+}
+
 static void driver_pgsql_exec(struct sql_db *db, const char *query)
 {
 	struct pgsql_result *result;
 	struct pgsql_query_params params;
 	i_zero(&params);
 
-	result = i_new(struct pgsql_result, 1);
-	result->api = driver_pgsql_result;
-	result->api.db = db;
-	result->api.refcount = 1;
-	result->api.event = event_create(db->event);
+	result = (struct pgsql_result *)new_result(db);
 	result->callback = exec_callback;
 	do_query(result, query, &params);
 }
@@ -791,11 +797,7 @@ static void driver_pgsql_query(struct sql_db *db, const char *query,
 	struct pgsql_query_params params;
 	i_zero(&params);
 
-	result = i_new(struct pgsql_result, 1);
-	result->api = driver_pgsql_result;
-	result->api.db = db;
-	result->api.refcount = 1;
-	result->api.event = event_create(db->event);
+	result = (struct pgsql_result *)new_result(db);
 	result->callback = callback;
 	result->context = context;
 	do_query(result, query, &params);
