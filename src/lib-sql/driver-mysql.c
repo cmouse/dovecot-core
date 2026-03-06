@@ -601,7 +601,7 @@ driver_mysql_result_get_fields_count(struct sql_result *_result)
 	struct mysql_result *result =
 		container_of(_result, struct mysql_result, api);
 
-        driver_mysql_result_fetch_fields(result);
+	driver_mysql_result_fetch_fields(result);
 	return result->fields_count;
 }
 
