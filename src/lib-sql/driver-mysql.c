@@ -136,6 +136,7 @@ struct mysql_db {
 
 struct mysql_result {
 	struct sql_result api;
+	pool_t result_pool;
 
 	MYSQL_RES *result;
 	MYSQL_STMT *stmt;
@@ -534,6 +535,8 @@ driver_mysql_query_s(struct sql_db *_db, const char *query)
 		/* query ok */
 		result->affected_rows = mysql_affected_rows(db->mysql);
 		result->result = mysql_store_result(db->mysql);
+		result->result_pool =
+			pool_alloconly_create("mysql result pool", 256);
 #ifdef CLIENT_MULTI_RESULTS
 		/* Because we've enabled CLIENT_MULTI_RESULTS, we need to read
 		   (ignore) extra results - there should not be any.
@@ -577,6 +580,7 @@ static void driver_mysql_result_free(struct sql_result *_result)
 		result->stmt = NULL;
 	}
 	event_unref(&_result->event);
+	pool_unref(&result->result_pool);
 	i_free(result);
 }
 
@@ -628,6 +632,10 @@ static int driver_mysql_result_next_row(struct sql_result *_result)
 	struct mysql_db *db = container_of(_result->db, struct mysql_db, api);
 	int ret;
 
+	/* clear previously returned results */
+	if (result->result_pool != NULL)
+		p_clear(result->result_pool);
+
 	if (result->stmt != NULL)
 		return driver_mysql_result_stmt_next_row(result);
 
@@ -637,6 +645,7 @@ static int driver_mysql_result_next_row(struct sql_result *_result)
 	}
 
 	result->row = mysql_fetch_row(result->result);
+
 	if (result->row != NULL)
 		ret = 1;
 	else {
@@ -714,7 +723,7 @@ driver_mysql_result_get_field_value(struct sql_result *_result,
 		b.buffer_type = MYSQL_TYPE_STRING;
 		mysql_stmt_fetch_column(result->stmt, &b, idx, 0);
 		if (b.buffer != NULL)
-			return t_strndup(b.buffer, len);
+			return p_strndup(result->result_pool, b.buffer, len);
 		return NULL;
 	}
 
@@ -734,7 +743,7 @@ driver_mysql_result_get_field_value_binary(struct sql_result *_result,
 		size_t len = f->length;
 		i_zero(&b);
 		if (len > 0)
-			b.buffer = t_malloc0(len);
+			b.buffer = p_malloc(result->result_pool, len);
 		b.buffer_length = len;
 		b.length = &len;
 		b.buffer_type = MYSQL_TYPE_BLOB;
@@ -871,6 +880,7 @@ execute_statement(struct mysql_statement *stmt, struct mysql_result **result_r)
 		result->api = driver_mysql_error_result;
 		result->error = i_strdup(mysql_stmt_error(stmt->stmt));
 	}
+	result->api.refcount = 1;
 	*result_r = result;
 
 	return ret;
