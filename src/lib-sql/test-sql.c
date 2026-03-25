@@ -29,6 +29,28 @@ static struct sql_db *setup_sql(void)
 	return sql;
 }
 
+static struct sql_db *setup_sql_sqlpool(void)
+{
+	struct settings_simple set;
+	settings_simple_init(&set, (const char *const []) {
+		"sql_driver", "mysql",
+		"mysql", "mysql_host=localhost",
+		NULL,
+	});
+	struct sql_db *sql = NULL;
+	const char *error = NULL;
+
+	sql_drivers_init_without_drivers();
+	sql_driver_test_register();
+
+	if (sql_init_auto(set.event, &sql, &error) <= 0)
+		i_fatal("%s", error);
+	test_assert(sql != NULL && error == NULL);
+
+	settings_simple_deinit(&set);
+	return sql;
+}
+
 static void deinit_sql(struct sql_db **_sql)
 {
 	struct sql_db *sql = *_sql;
@@ -161,11 +183,38 @@ static void test_sql_stmt_prepared_api(void)
 	test_end();
 }
 
+static void test_sql_sqlpool_stmt_transaction(void)
+{
+	test_begin("sqlpool statement transaction");
+
+	struct sql_db *sql = setup_sql_sqlpool();
+
+	struct test_driver_result result_1 = {
+		.nqueries = 1,
+		.queries = (const char *[]){
+			"UPDATE foo SET bar = 'baz'",
+		},
+	};
+	sql_driver_test_add_expected_result(sql, &result_1);
+
+	struct sql_transaction_context *trans = sql_transaction_begin(sql);
+	struct sql_statement *stmt =
+		sql_statement_init(sql, "UPDATE foo SET bar = ?");
+	sql_statement_bind_str(stmt, 0, "baz");
+	sql_update_stmt(trans, &stmt);
+	const char *error;
+	test_assert(sql_transaction_commit_s(&trans, &error) == 0);
+
+	deinit_sql(&sql);
+	test_end();
+}
+
 int main(void) {
 	static void (*const test_functions[])(void) = {
 		test_sql_api,
 		test_sql_stmt_api,
 		test_sql_stmt_prepared_api,
+		test_sql_sqlpool_stmt_transaction,
 		NULL
 	};
 	return test_run(test_functions);
