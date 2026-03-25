@@ -130,6 +130,7 @@ struct pgsql_result {
 	char *query;
 
 	ARRAY(struct pgsql_binary_value) binary_values;
+	pool_t stmt_pool;
 
 	sql_query_callback_t *callback;
 	void *context;
@@ -601,6 +602,8 @@ static void driver_pgsql_result_free(struct sql_result *_result)
 	i_free(result->query);
 	i_free(result->fields);
 	i_free(result->values);
+	if (result->stmt_pool != NULL)
+		pool_unref(&result->stmt_pool);
 	i_free(result);
 }
 
@@ -1631,16 +1634,22 @@ driver_pgsql_statement_query_s(struct sql_statement *_stmt)
 	struct pgsql_db *db = container_of(_stmt->db, struct pgsql_db, api);
 	struct pgsql_query_params params;
 	const char *query;
-	struct sql_result *result;
+	struct sql_result *api_result;
 
 	populate_stmt_params(stmt, &params);
 	query = convert_query_template(stmt);
 
 	driver_pgsql_sync_init(db);
-	result = driver_pgsql_sync_query(db, query, &params);
+	api_result = driver_pgsql_sync_query(db, query, &params);
 	driver_pgsql_sync_deinit(db);
 
-	return result;
+	if (api_result != &sql_not_connected_result) {
+		struct pgsql_result *result = (struct pgsql_result *)api_result;
+		result->stmt_pool = _stmt->pool;
+	} else {
+		pool_unref(&_stmt->pool);
+	}
+	return api_result;
 }
 
 static void
@@ -1659,6 +1668,7 @@ driver_pgsql_statement_query(struct sql_statement *_stmt,
 	result = container_of(new_result(&db->api), struct pgsql_result, api);
 	result->callback = callback;
 	result->context = context;
+	result->stmt_pool = _stmt->pool;
 
 	do_query(result, query, &params);
 }

@@ -858,6 +858,7 @@ execute_statement(struct mysql_statement *stmt, struct mysql_result **result_r)
 	}
 
 
+	result->result_pool = pool_alloconly_create("mysql result pool", 256);
 	switch (ret) {
 	case -1:
 		/* ignore */
@@ -1187,7 +1188,7 @@ driver_mysql_statement_query_s(struct sql_statement *_stmt)
 
 	int diff;
 	struct event_passthrough *e;
-	const char *query = stmt->api.query_template;
+	const char *query = sql_statement_get_log_query(_stmt);
         io_loop_time_refresh();
 	e = sql_query_finished_event(&db->api, event, query, ret == 0, &diff);
 
@@ -1205,6 +1206,8 @@ driver_mysql_statement_query_s(struct sql_statement *_stmt)
 	/* result free will close this */
 	result->stmt = stmt->stmt;
 	stmt->stmt = NULL;
+	pool_add_external_ref(result->result_pool, _stmt->pool);
+	pool_unref(&_stmt->pool);
 	return &result->api;
 }
 
