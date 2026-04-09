@@ -539,17 +539,18 @@ static void login_server_conn_input(struct login_server_connection *conn)
 				  login_server_auth_callback, request);
 }
 
-void login_server_add(struct login_server *server, int fd)
+void login_server_add(struct login_server *server,
+		      const struct master_service_connection *master_conn)
 {
 	struct login_server_connection *conn;
 
 	conn = i_new(struct login_server_connection, 1);
 	conn->refcount = 1;
 	conn->server = server;
-	conn->create_time = ioloop_timeval;
-	conn->fd = fd;
+	conn->create_time = master_conn->create_time;
+	conn->fd = master_conn->fd;
 	conn->io = io_add(conn->fd, IO_READ, login_server_conn_input, conn);
-	conn->output = o_stream_create_fd(fd, SIZE_MAX);
+	conn->output = o_stream_create_fd(conn->fd, SIZE_MAX);
 	o_stream_set_no_error_handling(conn->output, TRUE);
 
 	conn->event = event_create(server->service->event);

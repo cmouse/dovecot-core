@@ -75,6 +75,9 @@ struct master_service_connection {
 	struct ip_addr real_remote_ip, real_local_ip;
 	in_port_t real_remote_port, real_local_port;
 
+	/* Timestamp when the connection was accepted by the process. */
+	struct timeval create_time;
+
 	/* filled if connection is proxied */
 	struct master_service_connection_haproxy haproxy;
 

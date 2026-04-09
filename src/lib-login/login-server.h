@@ -8,6 +8,8 @@
 
 #define LOGIN_SERVER_POSTLOGIN_TIMEOUT_DEFAULT 60
 
+struct master_service_connection;
+
 struct login_server_connection {
 	struct login_server_connection *prev, *next;
 	struct event *event;
@@ -63,7 +65,8 @@ login_server_init(struct master_service *service,
 		  const struct login_server_settings *set);
 void login_server_deinit(struct login_server **server);
 
-void login_server_add(struct login_server *server, int fd);
+void login_server_add(struct login_server *server,
+		      const struct master_service_connection *master_conn);
 void login_server_stop(struct login_server *server);
 
 #endif

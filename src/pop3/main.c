@@ -355,7 +355,7 @@ static void client_connected(struct master_service_connection *conn)
 	i_assert(login_server != NULL);
 
 	master_service_client_connection_accept(conn);
-	login_server_add(login_server, conn->fd);
+	login_server_add(login_server, conn);
 }
 
 int main(int argc, char *argv[])

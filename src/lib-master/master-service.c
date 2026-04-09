@@ -1167,6 +1167,7 @@ static void
 master_service_connection_init_finish(struct master_service_connection *conn,
 				      const struct master_service_listener *l)
 {
+	i_gettimeofday(&conn->create_time);
 	conn->ssl = l->ssl;
 	conn->name = (l->name != NULL ? l->name : "");
 	conn->type = (l->type != NULL ? l->type : "");
@@ -1448,6 +1449,15 @@ void master_service_client_connection_created(struct master_service *service)
 	i_assert(service->master_status.available_count > 0);
 	service->master_status.available_count--;
 	master_status_update(service);
+
+	if (service->total_available_count == 1 &&
+	    service->io_status_write != NULL) {
+		/* For client_limit=1 services, don't start handling the new
+		   connection until master sees that this process is now busy.
+		   This avoids a race where master could still route another
+		   connection to this process while status write is blocked. */
+		master_status_update_wait(service);
+	}
 }
 
 static bool master_service_want_listener(struct master_service *service)
