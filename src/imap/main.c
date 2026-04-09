@@ -464,7 +464,7 @@ static void client_connected(struct master_service_connection *conn)
 		imap_master_client_create(conn->fd);
 		return;
 	}
-	login_server_add(login_server, conn->fd);
+	login_server_add(login_server, conn);
 }
 
 int main(int argc, char *argv[])
