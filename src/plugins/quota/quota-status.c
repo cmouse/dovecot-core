@@ -4,11 +4,15 @@
 #include "str.h"
 #include "str-sanitize.h"
 #include "ostream.h"
+#include "iostream.h"
 #include "connection.h"
 #include "restrict-access.h"
 #include "settings.h"
 #include "master-service.h"
 #include "master-service-settings.h"
+#include "net.h"
+#include "auth-master.h"
+#include "auth-proxy.h"
 #include "mail-namespace.h"
 #include "mail-storage.h"
 #include "mail-storage-settings.h"
@@ -19,18 +23,29 @@
 #include "quota-status-settings.h"
 
 enum quota_protocol {
-	QUOTA_PROTOCOL_UNKNOWN = 0,
-	QUOTA_PROTOCOL_POSTFIX
+        QUOTA_PROTOCOL_UNKNOWN = 0,
+        QUOTA_PROTOCOL_POSTFIX
+};
+
+enum quota_status_mode {
+        QUOTA_STATUS_MODE_BACKEND,
+        QUOTA_STATUS_MODE_PROXY
 };
 
 struct quota_client {
-	struct connection conn;
+        struct connection conn;
 
-	struct event *event;
+        struct event *event;
 
-	char *state;
-	char *recipient;
-	uoff_t size;
+        struct ip_addr local_ip, remote_ip;
+        struct ip_addr real_local_ip, real_remote_ip;
+        in_port_t local_port, remote_port;
+        in_port_t real_local_port, real_remote_port;
+
+        string_t *request_lines;
+        char *state;
+        char *recipient;
+        uoff_t size;
 
 	bool warned_bad_state:1;
 };
@@ -70,10 +85,11 @@ const struct setting_parser_info quota_status_result_setting_parser_info = {
 };
 
 static struct event_category event_category_quota_status = {
-	.name = "quota-status"
+        .name = "quota-status"
 };
 
 static const struct quota_status_settings *quota_status_settings;
+static enum quota_status_mode quota_status_mode;
 static enum quota_protocol protocol;
 static struct mail_storage_service_ctx *storage_service;
 static struct connection_list *clients;
@@ -84,20 +100,32 @@ static void client_connected(struct master_service_connection *conn)
 
 	client = i_new(struct quota_client, 1);
 
-	client->event = event_create(NULL);
-	client->conn.event_parent = client->event;
-	event_add_category(client->event, &event_category_quota_status);
-	connection_init_server(clients, &client->conn,
-			       "quota-client", conn->fd, conn->fd);
-	master_service_client_connection_accept(conn);
+        client->event = event_create(NULL);
+        client->conn.event_parent = client->event;
+        event_add_category(client->event, &event_category_quota_status);
+        connection_init_server(clients, &client->conn,
+                               "quota-client", conn->fd, conn->fd);
+        master_service_client_connection_accept(conn);
 
-	e_debug(client->event, "Client connected");
+        client->local_ip = conn->local_ip;
+        client->remote_ip = conn->remote_ip;
+        client->real_local_ip = conn->real_local_ip;
+        client->real_remote_ip = conn->real_remote_ip;
+        client->local_port = conn->local_port;
+        client->remote_port = conn->remote_port;
+        client->real_local_port = conn->real_local_port;
+        client->real_remote_port = conn->real_remote_port;
+
+        client->request_lines = str_new(default_pool, 128);
+
+        e_debug(client->event, "Client connected");
 }
 
 static void client_reset(struct quota_client *client)
 {
-	i_free(client->state);
-	i_free(client->recipient);
+        str_truncate(client->request_lines, 0);
+        i_free(client->state);
+        i_free(client->recipient);
 }
 
 static enum quota_alloc_result
@@ -133,10 +161,10 @@ quota_check(struct mail_user *user, uoff_t mail_size, const char **error_r)
 
 static int client_check_mta_state(struct quota_client *client)
 {
-	if (client->state == NULL ||
-	    strcasecmp(client->state, "RCPT") == 0 ||
-	    strcasecmp(client->state, "END-OF-MESSAGE") == 0)
-		return 0;
+        if (client->state == NULL ||
+            strcasecmp(client->state, "RCPT") == 0 ||
+            strcasecmp(client->state, "END-OF-MESSAGE") == 0)
+                return 0;
 
 	if (!client->warned_bad_state) {
 		e_warning(client->event,
@@ -144,8 +172,166 @@ static int client_check_mta_state(struct quota_client *client)
 		          "(service can only be used for recipient restrictions)",
 		          client->state);
 	}
-	client->warned_bad_state = TRUE;
-	return -1;
+        client->warned_bad_state = TRUE;
+        return -1;
+}
+
+static int
+quota_status_proxy_lookup(const struct quota_client *client, const char *username,
+                          struct auth_proxy_settings *proxy_set,
+                          const char **error_r)
+{
+        struct auth_user_info info;
+        struct auth_master_connection *auth_conn;
+        const char *const *fields;
+        pool_t pool;
+        int ret;
+
+        i_zero(proxy_set);
+        i_zero(&info);
+        info.protocol = master_service_get_name(master_service);
+        info.local_ip = client->local_ip;
+        info.real_local_ip = client->real_local_ip;
+        info.remote_ip = client->remote_ip;
+        info.real_remote_ip = client->real_remote_ip;
+        info.local_port = client->local_port;
+        info.real_local_port = client->real_local_port;
+        info.remote_port = client->remote_port;
+        info.real_remote_port = client->real_remote_port;
+
+        pool = pool_datastack_create();
+        auth_conn = mail_storage_service_get_auth_conn(storage_service);
+        ret = auth_master_pass_lookup(auth_conn, username, &info, pool, &fields);
+        if (ret <= 0) {
+                if (ret == 0 || fields[0] == NULL)
+                        *error_r = "Proxy lookup failed";
+                else
+                        *error_r = t_strdup(fields[0]);
+                return -1;
+        }
+
+        for (; *fields != NULL; fields++) {
+                const char *key, *value, *p, *parse_error;
+
+                p = strchr(*fields, '=');
+                if (p == NULL) {
+                        key = *fields;
+                        value = "";
+                } else {
+                        key = t_strdup_until(*fields, p);
+                        value = p + 1;
+                }
+
+                ret = auth_proxy_settings_parse(proxy_set, NULL, key, value,
+                                                &parse_error);
+                if (ret < 0) {
+                        *error_r = t_strdup_printf(
+                                "Invalid proxy setting %s=%s: %s",
+                                key, value, parse_error);
+                        return -1;
+                }
+        }
+        return 0;
+}
+
+static int
+quota_status_proxy_forward(struct quota_client *client,
+                           const struct auth_proxy_settings *proxy_set,
+                           const char **error_r)
+{
+        struct ip_addr host_ip;
+        in_port_t port = proxy_set->port != 0 ? proxy_set->port :
+                client->local_port;
+        const struct ip_addr *source_ip = NULL;
+        struct istream *input;
+        struct ostream *output;
+        string_t *response;
+        const char *line;
+        int fd, ret = -1;
+
+        host_ip = proxy_set->host_ip;
+        if (host_ip.family == 0) {
+                if (proxy_set->host == NULL ||
+                    net_addr2ip(proxy_set->host, &host_ip) < 0) {
+                        *error_r = "Proxy host missing";
+                        return -1;
+                }
+        }
+        if (proxy_set->source_ip.family != 0)
+                source_ip = &proxy_set->source_ip;
+        if (port == 0) {
+                *error_r = "Proxy port missing";
+                return -1;
+        }
+
+        fd = net_connect_ip(&host_ip, port, source_ip);
+        if (fd == -1) {
+                *error_r = t_strdup_printf("Failed to connect to proxy %s:%u: %s",
+                                           net_ip2addr(&host_ip), port,
+                                           i_strerror(errno));
+                return -1;
+        }
+
+        io_stream_create_fd_autoclose(&fd, (size_t)-1, (size_t)-1,
+                                      &input, &output);
+        o_stream_set_no_error_handling(output, TRUE);
+
+        if (o_stream_send(output, str_data(client->request_lines),
+                          str_len(client->request_lines)) < 0 ||
+            o_stream_finish(output) < 0) {
+                *error_r = "Failed to send request to proxy";
+                goto cleanup;
+        }
+
+        response = t_str_new(256);
+        while ((line = i_stream_read_next_line(input)) != NULL) {
+                str_append(response, line);
+                str_append_c(response, '\n');
+                if (*line == '\0')
+                        break;
+        }
+
+        if (line == NULL) {
+                *error_r = "Unexpected EOF from proxy";
+                goto cleanup;
+        }
+
+        e_debug(client->event, "Proxy response: %s",
+                str_sanitize(str_c(response), 512));
+        o_stream_nsend_str(client->conn.output, str_c(response));
+        ret = 0;
+cleanup:
+        i_stream_unref(&input);
+        o_stream_unref(&output);
+        return ret;
+}
+
+static int
+quota_status_try_proxy(struct quota_client *client, const char *username)
+{
+        struct auth_proxy_settings proxy_set;
+        const char *error;
+
+        if (quota_status_mode != QUOTA_STATUS_MODE_PROXY)
+                return 0;
+
+        if (quota_status_proxy_lookup(client, username, &proxy_set, &error) < 0) {
+                e_error(client->event, "Proxy lookup for %s failed: %s",
+                        username, error);
+                o_stream_nsend_str(client->conn.output,
+                                   "action=DEFER_IF_PERMIT Temporary internal error\n\n");
+                return 1;
+        }
+        if (!proxy_set.proxy)
+                return 0;
+
+        if (quota_status_proxy_forward(client, &proxy_set, &error) < 0) {
+                e_error(client->event, "Proxy forward for %s failed: %s",
+                        username, error);
+                o_stream_nsend_str(client->conn.output,
+                                   "action=DEFER_IF_PERMIT Temporary internal error\n\n");
+        }
+        return 1;
 }
 
 static void client_handle_request(struct quota_client *client)
@@ -188,14 +374,16 @@ static void client_handle_request(struct quota_client *client)
 		return;
 	}
 
-	i_zero(&input);
-	input.event_parent = client->event;
-	smtp_address_detail_parse_temp(quota_status_settings->recipient_delimiter,
-				       rcpt, &input.username, &delim,
-				       &detail);
-	ret = mail_storage_service_lookup_next(storage_service, &input,
-					       &user, &error);
-	restrict_access_allow_coredumps(TRUE);
+        i_zero(&input);
+        input.event_parent = client->event;
+        smtp_address_detail_parse_temp(quota_status_settings->recipient_delimiter,
+                                       rcpt, &input.username, &delim,
+                                       &detail);
+        if (quota_status_try_proxy(client, input.username) != 0)
+                return;
+        ret = mail_storage_service_lookup_next(storage_service, &input,
+                                               &user, &error);
+        restrict_access_allow_coredumps(TRUE);
 	if (ret == 0) {
 		e_debug(client->event, "User `%s' not found", input.username);
 		value = quota_status_settings->quota_status_nouser;
@@ -276,15 +464,18 @@ static void client_handle_request(struct quota_client *client)
 
 static int client_input_line(struct connection *conn, const char *line)
 {
-	struct quota_client *client = (struct quota_client *)conn;
-	const char *value;
+        struct quota_client *client = (struct quota_client *)conn;
+        const char *value;
 
-	e_debug(client->event, "Request: %s", str_sanitize(line, 1024));
+        e_debug(client->event, "Request: %s", str_sanitize(line, 1024));
 
-	if (*line == '\0') {
-		o_stream_cork(conn->output);
-		client_handle_request(client);
-		o_stream_uncork(conn->output);
+        str_append(client->request_lines, line);
+        str_append_c(client->request_lines, '\n');
+
+        if (*line == '\0') {
+                o_stream_cork(conn->output);
+                client_handle_request(client);
+                o_stream_uncork(conn->output);
 		client_reset(client);
 		return 1;
 	}
@@ -305,12 +496,13 @@ static void client_destroy(struct connection *conn)
 {
 	struct quota_client *client = (struct quota_client *)conn;
 
-	e_debug(client->event, "Client disconnected");
+        e_debug(client->event, "Client disconnected");
 
-	connection_deinit(&client->conn);
-	client_reset(client);
-	event_unref(&client->event);
-	i_free(client);
+        connection_deinit(&client->conn);
+        client_reset(client);
+        str_free(&client->request_lines);
+        event_unref(&client->event);
+        i_free(client);
 
 	master_service_client_connection_destroyed(master_service);
 }
@@ -349,12 +541,20 @@ static void main_init(void)
 		MAIL_STORAGE_SERVICE_FLAG_NO_CHDIR);
 
 	i_zero(&input);
-	input.service = "quota-status";
-	input.username = "";
+        input.service = "quota-status";
+        input.username = "";
 
-	quota_status_settings = settings_get_or_fatal(
-		master_service_get_event(master_service),
-		&quota_status_setting_parser_info);
+        quota_status_settings = settings_get_or_fatal(
+                master_service_get_event(master_service),
+                &quota_status_setting_parser_info);
+        if (strcasecmp(quota_status_settings->mode, "proxy") == 0)
+                quota_status_mode = QUOTA_STATUS_MODE_PROXY;
+        else if (strcasecmp(quota_status_settings->mode, "backend") == 0)
+                quota_status_mode = QUOTA_STATUS_MODE_BACKEND;
+        else {
+                i_fatal("Invalid quota_status mode: %s",
+                        quota_status_settings->mode);
+        }
 }
 
 static void main_deinit(void)
