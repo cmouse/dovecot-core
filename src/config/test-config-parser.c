@@ -5,6 +5,7 @@
 #include "service-settings.h"
 #include "settings-parser.h"
 #include "config-filter.h"
+#include "config-request.h"
 #include "test-common.h"
 #include "test-dir.h"
 #include "all-settings.h"
@@ -190,10 +191,178 @@ static void test_config_parser(void)
 	test_end();
 }
 
+static void test_config_parser_heredoc(void)
+{
+	struct config_parsed *config;
+	const char *error = NULL;
+	const char *config_file = test_dir_prepend(TEST_CONFIG_FILE);
+	pool_t pool;
+	struct config_filter_parser *global_filter;
+	const struct config_module_parser *p;
+	struct setting_parser_context *set_parser;
+	const struct test_settings *set;
+
+	test_begin("config_parse_file - heredoc basic");
+	write_config_file(
+"dovecot_config_version = "DOVECOT_CONFIG_VERSION"\n"
+"key = <<EOD\n"
+"line1\n"
+"line2\n"
+"EOD\n"
+	);
+	test_assert(config_parse_file(config_file,
+				      CONFIG_PARSE_FLAG_EXPAND_VALUES |
+				      CONFIG_PARSE_FLAG_NO_DEFAULTS,
+				      NULL, &config, &error) == 1);
+	if (error != NULL)
+		i_error("config_parse_file(): %s", error);
+	pool = pool_alloconly_create("test settings", 128);
+	global_filter = config_parsed_get_global_filter_parser(config);
+	p = global_filter->module_parsers;
+	set_parser = settings_parser_init(pool, p->info, 0);
+	config_fill_set_parser(set_parser, p, TRUE);
+	set = settings_parser_get_set(set_parser);
+	test_assert_strcmp(set->key, "line1\nline2\n");
+	settings_parser_unref(&set_parser);
+	config_parsed_free(&config);
+	config_parser_deinit();
+	i_unlink_if_exists(config_file);
+	pool_unref(&pool);
+	test_end();
+
+	test_begin("config_parse_file - heredoc custom marker");
+	write_config_file(
+"dovecot_config_version = "DOVECOT_CONFIG_VERSION"\n"
+"key = <<MYMARKER\n"
+"value with EOD inside\n"
+"MYMARKER\n"
+	);
+	test_assert(config_parse_file(config_file,
+				      CONFIG_PARSE_FLAG_EXPAND_VALUES |
+				      CONFIG_PARSE_FLAG_NO_DEFAULTS,
+				      NULL, &config, &error) == 1);
+	if (error != NULL)
+		i_error("config_parse_file(): %s", error);
+	pool = pool_alloconly_create("test settings", 128);
+	global_filter = config_parsed_get_global_filter_parser(config);
+	p = global_filter->module_parsers;
+	set_parser = settings_parser_init(pool, p->info, 0);
+	config_fill_set_parser(set_parser, p, TRUE);
+	set = settings_parser_get_set(set_parser);
+	test_assert_strcmp(set->key, "value with EOD inside\n");
+	settings_parser_unref(&set_parser);
+	config_parsed_free(&config);
+	config_parser_deinit();
+	i_unlink_if_exists(config_file);
+	pool_unref(&pool);
+	test_end();
+
+	test_begin("config_parse_file - heredoc EODXXX does not terminate");
+	write_config_file(
+"dovecot_config_version = "DOVECOT_CONFIG_VERSION"\n"
+"key = <<EOD\n"
+"EODXXX\n"
+"real line\n"
+"EOD\n"
+	);
+	test_assert(config_parse_file(config_file,
+				      CONFIG_PARSE_FLAG_EXPAND_VALUES |
+				      CONFIG_PARSE_FLAG_NO_DEFAULTS,
+				      NULL, &config, &error) == 1);
+	if (error != NULL)
+		i_error("config_parse_file(): %s", error);
+	pool = pool_alloconly_create("test settings", 128);
+	global_filter = config_parsed_get_global_filter_parser(config);
+	p = global_filter->module_parsers;
+	set_parser = settings_parser_init(pool, p->info, 0);
+	config_fill_set_parser(set_parser, p, TRUE);
+	set = settings_parser_get_set(set_parser);
+	test_assert_strcmp(set->key, "EODXXX\nreal line\n");
+	settings_parser_unref(&set_parser);
+	config_parsed_free(&config);
+	config_parser_deinit();
+	i_unlink_if_exists(config_file);
+	pool_unref(&pool);
+	test_end();
+
+	test_begin("config_parse_file - heredoc missing terminator");
+	write_config_file(
+"dovecot_config_version = "DOVECOT_CONFIG_VERSION"\n"
+"key = <<EOD\n"
+"line1\n"
+	);
+	error = NULL;
+	test_assert(config_parse_file(config_file,
+				      CONFIG_PARSE_FLAG_EXPAND_VALUES |
+				      CONFIG_PARSE_FLAG_NO_DEFAULTS,
+				      NULL, &config, &error) < 0);
+	test_assert(error != NULL);
+	if (config != NULL)
+		config_parsed_free(&config);
+	config_parser_deinit();
+	i_unlink_if_exists(config_file);
+	test_end();
+}
+
+static const char *heredoc_marker_got;
+
+static void
+test_config_export_callback(const struct config_export_setting *set, void *context ATTR_UNUSED)
+{
+	if (strcmp(set->key, "key") == 0 && set->heredoc_marker != NULL)
+		heredoc_marker_got = set->heredoc_marker;
+}
+
+static void test_config_parser_heredoc_marker_preserved(void)
+{
+	struct config_parsed *config;
+	const char *error = NULL;
+	const char *config_file = test_dir_prepend(TEST_CONFIG_FILE);
+
+	test_begin("config_parse_file - heredoc marker preserved in export");
+	write_config_file(
+"dovecot_config_version = "DOVECOT_CONFIG_VERSION"\n"
+"key = <<FOO\n"
+"line1\n"
+"FOO\n"
+	);
+	test_assert(config_parse_file(config_file,
+				      CONFIG_PARSE_FLAG_EXPAND_VALUES |
+				      CONFIG_PARSE_FLAG_NO_DEFAULTS,
+				      NULL, &config, &error) == 1);
+	if (error != NULL)
+		i_error("config_parse_file(): %s", error);
+
+	heredoc_marker_got = NULL;
+	struct config_filter_parser *global_filter =
+		config_parsed_get_global_filter_parser(config);
+	struct config_export_context *ectx =
+		config_export_init(CONFIG_DUMP_SCOPE_SET, 0,
+				   DOVECOT_CONFIG_VERSION, "",
+				   test_config_export_callback, NULL);
+	config_export_set_module_parsers(ectx, global_filter->module_parsers);
+	const char *exp_error;
+	for (unsigned int i = 0; i < config_export_get_parser_count(ectx); i++) {
+		if (config_export_parser(ectx, i, &exp_error) < 0) {
+			i_error("config_export_parser: %s", exp_error);
+			break;
+		}
+	}
+	config_export_free(&ectx);
+	test_assert_strcmp(heredoc_marker_got, "FOO");
+
+	config_parsed_free(&config);
+	config_parser_deinit();
+	i_unlink_if_exists(config_file);
+	test_end();
+}
+
 int main(void)
 {
 	static void (*const test_functions[])(void) = {
 		test_config_parser,
+		test_config_parser_heredoc,
+		test_config_parser_heredoc_marker_preserved,
 		NULL
 	};
 

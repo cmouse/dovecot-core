@@ -72,13 +72,28 @@ config_request_get_strings(const struct config_export_setting *set,
 	switch (set->type) {
 	case CONFIG_KEY_NORMAL:
 		key = set->key;
-		if (set->def_type != SET_FILE)
+		if (set->value_is_file_inline) {
+			/* SET_FILE inline content: always output as heredoc.
+			   set->value starts with \n (settings_file_get compat);
+			   strip it for the heredoc body. Use the preserved
+			   marker when available, else fall back to "END". */
+			const char *content =
+				set->value[0] == '\n' ?
+				set->value + 1 : set->value;
+			const char *marker =
+				set->heredoc_marker != NULL ?
+				set->heredoc_marker : "END";
+			value = p_strdup_printf(ctx->pool, "%c%s\n%s",
+						CONFIG_VALUE_PREFIX_HEREDOC,
+						marker, content);
+		} else {
 			value = set->value;
-		else if (set->value[0] != '\n')
-			value = t_strcut(set->value, '\n');
-		else
-			value = t_strconcat(SET_FILE_INLINE_PREFIX,
-					    set->value + 1, NULL);
+			if (set->heredoc_marker != NULL)
+				value = p_strdup_printf(ctx->pool, "%c%s\n%s",
+							CONFIG_VALUE_PREFIX_HEREDOC,
+							set->heredoc_marker,
+							value);
+		}
 		value = p_strdup_printf(ctx->pool, "%s=%s", key, value);
 		break;
 	case CONFIG_KEY_BOOLLIST_ELEM:
@@ -294,16 +309,16 @@ static inline bool key_ends_with(const char *key, const char *eptr,
 
 static bool
 hide_secrets_from_value(struct ostream *output, const char *key,
-			const char *value)
+			const char *eptr, const char *value)
 {
 	bool ret = FALSE, quote = value_need_quote(value);
 	const char *ptr, *optr, *secret;
 
 	if (*value != '\0' &&
-	    (key_ends_with(key, value, "_password") ||
-	     key_ends_with(key, value, "_key") ||
-	     key_ends_with(key, value, "_nonce") ||
-	     key_ends_with(key, value, "_secret") ||
+	    (key_ends_with(key, eptr, "_password") ||
+	     key_ends_with(key, eptr, "_key") ||
+	     key_ends_with(key, eptr, "_nonce") ||
+	     key_ends_with(key, eptr, "_secret") ||
 	     str_begins_with(key, "ssl_dh"))) {
 		o_stream_nsend_str(output, "# hidden, use -P to show it");
 		return TRUE;
@@ -625,21 +640,39 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 			if (output->offset != 0)
 				i_fatal("Multiple settings matched with -h parameter");
 		}
+		/* Extract embedded heredoc marker if present */
+		const char *display_value = value + 1;
+		const char *embedded_marker = NULL;
+		if ((unsigned char)display_value[0] == CONFIG_VALUE_PREFIX_HEREDOC) {
+			const char *sep = strchr(display_value + 1, '\n');
+			embedded_marker = t_strdup_until(display_value + 1, sep);
+			display_value = sep + 1;
+		}
+
 		if (hide_key && value[0] == '=' && value[1] == '\0') {
 			/* There is no value that would need printing here,
 			   continue with the next. */
 		} else if (hide_value)
 			; /* boollist value was already written */
 		else if (hide_passwords &&
-			 hide_secrets_from_value(output, full_key, value+1))
+			 hide_secrets_from_value(output, full_key, value + 1, display_value))
 			/* sent */
 			;
-		else if (!value_need_quote(value+1))
-			o_stream_nsend_str(output, value+1);
+		else if (embedded_marker != NULL) {
+			size_t dlen = strlen(display_value);
+			o_stream_nsend_str(output, "<<");
+			o_stream_nsend_str(output, embedded_marker);
+			o_stream_nsend_str(output, "\n");
+			o_stream_nsend_str(output, display_value);
+			if (dlen == 0 || display_value[dlen - 1] != '\n')
+				o_stream_nsend_str(output, "\n");
+			o_stream_nsend_str(output, embedded_marker);
+		} else if (!value_need_quote(display_value))
+			o_stream_nsend_str(output, display_value);
 		else {
-			o_stream_nsend(output, "\"", 1);
-			o_stream_nsend_str(output, str_escape(value+1));
-			o_stream_nsend(output, "\"", 1);
+			o_stream_nsend_str(output, "\"");
+			o_stream_nsend_str(output, str_escape(display_value));
+			o_stream_nsend_str(output, "\"");
 		}
 		if (!boollist_one_line && value[1] == '\0' && i+1 < count &&
 		    str_begins(strings[i+1], t_strcut(strings[i], '='), &suffix) &&

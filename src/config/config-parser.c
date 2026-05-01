@@ -466,7 +466,7 @@ config_filter_get_value(struct config_parser_context *ctx,
 		value = &l2->settings[config_key->define_idx];
 
 	if (value != NULL) {
-		if (value->prefixed_str[0] == CONFIG_VALUE_PREFIX_EXPANDED) {
+		if ((uint8_t)value->prefixed_str[0] != CONFIG_VALUE_PREFIX_SET_UNEXPANDED) {
 			str_append(str, set_str_expanded(value));
 			return 1;
 		}
@@ -1049,6 +1049,24 @@ config_apply_exact_line(struct config_parser_context *ctx,
 			break;
 		case SET_FILE: {
 			const char *inline_value;
+			if (((uint8_t)prefixed_value[0] & CONFIG_VALUE_PREFIX_HEREDOC) != 0) {
+				/* Heredoc for file setting: preserve marker and
+				   mark as FILE_INLINE. Store as
+				   HEREDOC|FILE_INLINE + MARKER + \n\n + content
+				   so set_str_expanded returns \ncontent, which
+				   settings_file_get() interprets as inline (empty
+				   path, full content). */
+				const char *rest = prefixed_value + 1; /* MARKER\ncontent */
+				const char *sep = strchr(rest, '\n');
+				i_assert(sep != NULL);
+				l->settings[config_key->define_idx].prefixed_str =
+					p_strdup_printf(ctx->pool, "%c%.*s\n\n%s",
+						CONFIG_VALUE_PREFIX_HEREDOC |
+						CONFIG_VALUE_PREFIX_FILE_INLINE,
+						(int)(sep - rest), rest,
+						sep + 1);
+				break;
+			}
 			if (prefixed_value[0] != CONFIG_VALUE_PREFIX_EXPANDED) {
 				/* FIXME: implement in a later commit */
 				i_assert(prefixed_value[0] == CONFIG_VALUE_PREFIX_SET_UNEXPANDED);
@@ -1060,10 +1078,14 @@ config_apply_exact_line(struct config_parser_context *ctx,
 			const char *value = prefixed_value + 1;
 			if (str_begins(value, SET_FILE_INLINE_PREFIX,
 				       &inline_value)) {
+				/* "ssl_ca = inline:cert": store as FILE_INLINE.
+				   Use \n prefix so set_str_expanded returns
+				   \ncontent for settings_file_get() compat. */
 				l->settings[config_key->define_idx].prefixed_str =
-					value[0] == '\0' ? CONFIG_VALUE_PREFIX_EXPANDED_S :
+					inline_value[0] == '\0' ?
+					CONFIG_VALUE_PREFIX_EXPANDED_S :
 					p_strdup_printf(ctx->pool, "%c\n%s",
-							CONFIG_VALUE_PREFIX_EXPANDED,
+							CONFIG_VALUE_PREFIX_FILE_INLINE,
 							inline_value);
 				break;
 			}
@@ -2158,6 +2180,29 @@ static int config_str_unescape(char *str, const char **error_r)
 	return 0;
 }
 
+static void parse_until_eod(struct config_parser_context *ctx,
+			    const char *marker,
+			    struct config_line *config_line_r)
+{
+	string_t *tmp = str_new(ctx->pool, 64);
+	const char *line;
+
+	while ((line = i_stream_read_next_line(ctx->cur_input->input)) != NULL) {
+		ctx->cur_input->linenum++;
+		if (strcmp(line, marker) == 0) {
+			config_line_r->value = str_c(tmp);
+			config_line_r->heredoc_marker = p_strdup(ctx->pool, marker);
+			config_line_r->type = CONFIG_LINE_TYPE_KEYVALUE;
+			return;
+		}
+		/* as this is multiline input, put newline in value */
+		str_append(tmp, line);
+		str_append_c(tmp, '\n');
+	}
+	config_line_r->value = p_strconcat(ctx->pool, "Missing ", marker, NULL);
+	config_line_r->type = CONFIG_LINE_TYPE_ERROR;
+}
+
 static void
 config_parse_line(struct config_parser_context *ctx,
 		  char *line, string_t *full_line,
@@ -2278,6 +2323,10 @@ config_parse_line(struct config_parser_context *ctx,
 		*line++ = '\0';
 		while (i_isspace(*line)) line++;
 
+		if (line[0] == '<' && line[1] == '<' && line[2] != '\0') {
+			parse_until_eod(ctx, line + 2, config_line_r);
+			return;
+		}
 		if (*line == '<') {
 			while (i_isspace(line[1])) line++;
 			config_line_r->value = line + 1;
@@ -2594,7 +2643,7 @@ static int config_expand_value(struct config_parser_context *ctx,
 			       struct config_filter_parser *filter_parser,
 			       const char *key, const char **value)
 {
-	if ((*value)[0] == CONFIG_VALUE_PREFIX_EXPANDED)
+	if ((uint8_t)(*value)[0] != CONFIG_VALUE_PREFIX_SET_UNEXPANDED)
 		return 0;
 	i_assert((*value)[0] == CONFIG_VALUE_PREFIX_SET_UNEXPANDED);
 
@@ -2888,8 +2937,15 @@ static int config_write_value(struct config_parser_context *ctx,
 
 	switch (line->type) {
 	case CONFIG_LINE_TYPE_KEYVALUE:
-		str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_EXPANDED);
-		str_append(ctx->prefixed_value, line->value);
+		if (line->heredoc_marker != NULL) {
+			str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_HEREDOC);
+			str_append(ctx->prefixed_value, line->heredoc_marker);
+			str_append_c(ctx->prefixed_value, '\n');
+			str_append(ctx->prefixed_value, line->value);
+		} else {
+			str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_EXPANDED);
+			str_append(ctx->prefixed_value, line->value);
+		}
 		break;
 	case CONFIG_LINE_TYPE_KEYFILE:
 		str_append_c(ctx->prefixed_value, CONFIG_VALUE_PREFIX_EXPANDED);

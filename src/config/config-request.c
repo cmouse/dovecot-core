@@ -418,12 +418,19 @@ settings_export(struct config_export_context *ctx,
 					type = CONFIG_KEY_FILTER_ARRAY;
 				else
 					type = CONFIG_KEY_NORMAL;
+				uint8_t prefix =
+					module_parser->settings[define_idx].prefixed_str != NULL ?
+					(uint8_t)module_parser->settings[define_idx].prefixed_str[0] : 0;
 				struct config_export_setting export_set = {
 					.type = type,
 					.def_type = def->type,
 					.key = def->key,
 					.key_define_idx = define_idx,
 					.value = str_c(ctx->value),
+					.heredoc_marker = (prefix & CONFIG_VALUE_PREFIX_HEREDOC) != 0 ?
+						set_str_heredoc_marker(&module_parser->settings[define_idx]) : NULL,
+					.value_is_file_inline =
+						(prefix & CONFIG_VALUE_PREFIX_FILE_INLINE) != 0,
 				};
 				ctx->callback(&export_set, ctx->context);
 				if ((ctx->flags & CONFIG_DUMP_FLAG_DEDUPLICATE_KEYS) != 0)
